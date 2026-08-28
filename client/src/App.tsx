@@ -7,7 +7,7 @@ import "./App.css";
 
 type Metadata = { name: string; size: number; type: string; hash: string };
 type Incoming = { transferId: string; metadata: Metadata; chunks: Blob[]; size: number };
-type Peer = { pc: RTCPeerConnection; channel?: RTCDataChannel; candidates: RTCIceCandidateInit[] };
+type Peer = { pc: RTCPeerConnection; channel?: RTCDataChannel; candidates: RTCIceCandidateInit[]; offerStarted: boolean };
 
 const MAX_MEMBERS = 5;
 const CHUNK_SIZE = 64 * 1024;
@@ -99,7 +99,7 @@ function App() {
   const createPeer = (peerId: string) => {
     const existing = peersRef.current.get(peerId);
     if (existing) return existing;
-    const peer: Peer = { pc: new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] }), candidates: [] };
+    const peer: Peer = { pc: new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] }), candidates: [], offerStarted: false };
     peer.pc.onicecandidate = (event) => event.candidate && signal(peerId, { type: "ice-candidate", candidate: event.candidate });
     peer.pc.onconnectionstatechange = () => {
       refreshConnected();
@@ -113,7 +113,8 @@ function App() {
   const makeOffer = async (peerId: string) => {
     try {
       const peer = createPeer(peerId);
-      if (peer.pc.signalingState !== "stable") return;
+      if (peer.offerStarted || peer.pc.signalingState !== "stable") return;
+      peer.offerStarted = true;
       setupChannel(peerId, peer.pc.createDataChannel("file-transfer"));
       const offer = await peer.pc.createOffer();
       await peer.pc.setLocalDescription(offer);
@@ -154,7 +155,8 @@ function App() {
       // Use a deterministic initiator for every pair. This prevents offer
       // collisions and does not depend on join timing or browser speed.
       for (const peerId of activeIds) {
-        if (peerId !== clientIdRef.current && clientIdRef.current < peerId && !peersRef.current.has(peerId)) {
+        const peer = peersRef.current.get(peerId);
+        if (peerId !== clientIdRef.current && clientIdRef.current < peerId && !peer?.offerStarted) {
           void makeOffer(peerId);
         }
       }
