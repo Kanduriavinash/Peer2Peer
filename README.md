@@ -3,6 +3,7 @@
 > Direct, browser-to-browser file sharing without uploading files to a central storage service.
 
 PeerShare is a WebRTC-based peer-to-peer file-transfer application. A user creates a temporary room, shares its code, and connects up to four additional members. Every member can upload a file, and every connected member receives an independently verified download.
+ [Live link](https://kanduriavinash.github.io/Peer2Peer/)
 
 The project is designed around a simple architectural principle:
 
