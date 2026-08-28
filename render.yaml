@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: peershare-signaling
+    runtime: node
+    buildCommand: cd server && npm ci && npm run build
+    startCommand: cd server && npm start

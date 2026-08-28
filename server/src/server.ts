@@ -1,18 +1,22 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { randomBytes } from "crypto";
 
-const PORT = 8080;
+const PORT = Number(process.env.PORT ?? 8080);
+const HOST = "0.0.0.0";
 
 type Client = {
+  id: string;
   socket: WebSocket;
   roomId: string | null;
 };
 
 const clients = new Map<WebSocket, Client>();
 const rooms = new Map<string, Set<WebSocket>>();
+const MAX_ROOM_SIZE = 5;
 
 const wss = new WebSocketServer({
   port: PORT,
+  host: HOST,
 });
 
 function generateRoomId(): string {
@@ -23,6 +27,13 @@ function send(socket: WebSocket, message: object) {
   if (socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(message));
   }
+}
+
+function getClientById(id: string, room: Set<WebSocket>) {
+  for (const socket of room) {
+    if (clients.get(socket)?.id === id) return socket;
+  }
+  return undefined;
 }
 
 function leaveRoom(socket: WebSocket) {
@@ -40,6 +51,7 @@ function leaveRoom(socket: WebSocket) {
     for (const peer of room) {
       send(peer, {
         type: "peer-left",
+        peerId: client.id,
       });
     }
 
@@ -54,7 +66,10 @@ function leaveRoom(socket: WebSocket) {
 function joinRoom(socket: WebSocket, roomId: string) {
   const normalizedRoomId = roomId.trim().toUpperCase();
 
-  if (!normalizedRoomId || normalizedRoomId.length > 20) {
+  if (
+    !normalizedRoomId ||
+    normalizedRoomId.length > 20
+  ) {
     send(socket, {
       type: "error",
       message: "Invalid room ID",
@@ -72,7 +87,7 @@ function joinRoom(socket: WebSocket, roomId: string) {
     rooms.set(normalizedRoomId, room);
   }
 
-  if (room.size >= 2) {
+  if (room.size >= MAX_ROOM_SIZE) {
     send(socket, {
       type: "error",
       message: "Room is full",
@@ -93,12 +108,18 @@ function joinRoom(socket: WebSocket, roomId: string) {
     type: "room-joined",
     roomId: normalizedRoomId,
     peers: room.size - 1,
+    peerIds: [...room]
+      .filter((peer) => peer !== socket)
+      .map((peer) => clients.get(peer)?.id)
+      .filter(Boolean),
   });
 
   for (const peer of room) {
     if (peer !== socket) {
+      const client = clients.get(socket);
       send(peer, {
         type: "peer-joined",
+        peerId: client?.id,
       });
     }
   }
@@ -106,6 +127,7 @@ function joinRoom(socket: WebSocket, roomId: string) {
 
 wss.on("connection", (socket) => {
   clients.set(socket, {
+    id: randomBytes(8).toString("hex"),
     socket,
     roomId: null,
   });
@@ -116,7 +138,9 @@ wss.on("connection", (socket) => {
 
   socket.on("message", (rawMessage) => {
     try {
-      const message = JSON.parse(rawMessage.toString());
+      const message = JSON.parse(
+        rawMessage.toString(),
+      );
 
       if (message.type === "create-room") {
         const roomId = generateRoomId();
@@ -154,11 +178,17 @@ wss.on("connection", (socket) => {
           return;
         }
 
-        for (const peer of room) {
-          if (peer !== socket) {
-            send(peer, message);
-          }
+        const sender = clients.get(socket);
+        const target = typeof message.to === "string"
+          ? getClientById(message.to, room)
+          : undefined;
+
+        if (!sender || !target || target === socket) {
+          send(socket, { type: "error", message: "Peer target was not found" });
+          return;
         }
+
+        send(target, { ...message, from: sender.id });
 
         return;
       }
@@ -186,4 +216,15 @@ wss.on("connection", (socket) => {
   });
 });
 
-console.log(`PeerShare signaling server running on ws://localhost:${PORT}`);
+wss.on("listening", () => {
+  console.log(
+    `PeerShare signaling server running on ws://${HOST}:${PORT}`,
+  );
+});
+
+wss.on("error", (error) => {
+  console.error(
+    "WebSocket server error:",
+    error,
+  );
+});
