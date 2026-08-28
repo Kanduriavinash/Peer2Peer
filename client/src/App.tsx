@@ -232,6 +232,24 @@ function App() {
     setError(""); void joinFirebaseRoom(code).catch((roomError) => setError(roomError instanceof Error ? roomError.message : "Could not join room."));
   };
 
+  useEffect(() => {
+    if (!inRoom) return;
+    const retryDisconnectedPeers = async () => {
+      const snapshot = await get(ref(database, `rooms/${roomRef.current}/members`));
+      const memberIds = Object.keys(snapshot.val() ?? {}).filter((id) => id !== clientIdRef.current);
+      for (const peerId of memberIds) {
+        const peer = peersRef.current.get(peerId);
+        if (clientIdRef.current < peerId && peer?.channel?.readyState !== "open") {
+          removePeer(peerId);
+          offerRetriesRef.current.set(peerId, 0);
+          void makeOffer(peerId);
+        }
+      }
+    };
+    const timer = window.setInterval(() => void retryDisconnectedPeers(), 5000);
+    return () => window.clearInterval(timer);
+  }, [inRoom]);
+
   const sendFile = async () => {
     if (!file) return setError("Choose a file first.");
     const channels = [...peersRef.current.values()].map((peer) => peer.channel).filter((channel): channel is RTCDataChannel => channel?.readyState === "open");
