@@ -146,7 +146,13 @@ function App() {
   useEffect(() => {
     signInAnonymously(auth)
       .then(() => setServerStatus("online"))
-      .catch(() => { setServerStatus("offline"); setError("Firebase sign-in is disabled. Enable Anonymous sign-in in Firebase Authentication."); });
+      .catch((authError: unknown) => {
+        const code = authError instanceof Error && "code" in authError
+          ? String(authError.code)
+          : "unknown-error";
+        setServerStatus("offline");
+        setError(`Firebase sign-in failed (${code}). Check Anonymous sign-in and Authorized domains.`);
+      });
     return () => { peersRef.current.forEach((peer) => peer.pc.close()); };
   }, []);
 
