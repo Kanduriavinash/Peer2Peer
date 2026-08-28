@@ -22,6 +22,7 @@ function App() {
   const clientIdRef = useRef(createId());
   const roomRef = useRef("");
   const peersRef = useRef(new Map<string, Peer>());
+  const offerRetriesRef = useRef(new Map<string, number>());
   const incomingRef = useRef(new Map<string, Incoming>());
   const [serverStatus, setServerStatus] = useState("connecting");
   const [roomId, setRoomId] = useState("");
@@ -55,6 +56,7 @@ function App() {
     peer.channel = channel;
     channel.onopen = () => {
       setError("");
+      offerRetriesRef.current.delete(peerId);
       refreshConnected();
     };
     channel.onclose = refreshConnected;
@@ -119,6 +121,15 @@ function App() {
       const offer = await peer.pc.createOffer();
       await peer.pc.setLocalDescription(offer);
       signal(peerId, { type: "offer", offer });
+      window.setTimeout(() => {
+        const current = peersRef.current.get(peerId);
+        const retries = offerRetriesRef.current.get(peerId) ?? 0;
+        if (current?.channel?.readyState === "open" || retries >= 3) return;
+        offerRetriesRef.current.set(peerId, retries + 1);
+        removePeer(peerId);
+        setStatus("Retrying direct connection...");
+        void makeOffer(peerId);
+      }, 8000);
     } catch (offerError) {
       setError(`Could not connect to a member: ${offerError instanceof Error ? offerError.message : "WebRTC offer failed"}`);
     }
