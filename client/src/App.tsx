@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { sha256 } from "js-sha256";
-import { get, onDisconnect, onValue, push, ref, remove, set } from "firebase/database";
+import { get, onChildAdded, onDisconnect, onValue, push, ref, remove, set } from "firebase/database";
 import { signInAnonymously } from "firebase/auth";
 import { auth, database } from "./firebase";
 import "./App.css";
@@ -38,7 +38,11 @@ function App() {
   const signal = (to: string, message: object) => {
     const room = roomRef.current;
     if (!room) return;
-    push(ref(database, `rooms/${room}/signals/${to}`), { ...message, from: clientIdRef.current });
+    void push(ref(database, `rooms/${room}/signals/${to}`), { ...message, from: clientIdRef.current })
+      .catch((signalError: unknown) => {
+        const code = signalError instanceof Error && "code" in signalError ? String(signalError.code) : "unknown-error";
+        setError(`Firebase signaling failed (${code}). Check that Realtime Database rules are published.`);
+      });
   };
 
   const refreshConnected = () => setConnectedCount([...peersRef.current.values()].filter((peer) => peer.channel?.readyState === "open").length);
@@ -97,7 +101,10 @@ function App() {
     if (existing) return existing;
     const peer: Peer = { pc: new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] }), candidates: [] };
     peer.pc.onicecandidate = (event) => event.candidate && signal(peerId, { type: "ice-candidate", candidate: event.candidate });
-    peer.pc.onconnectionstatechange = refreshConnected;
+    peer.pc.onconnectionstatechange = () => {
+      refreshConnected();
+      if (peer.pc.connectionState === "failed") setError("A direct connection failed. Try again on a different network or configure TURN.");
+    };
     peer.pc.ondatachannel = (event) => setupChannel(peerId, event.channel);
     peersRef.current.set(peerId, peer);
     return peer;
@@ -159,38 +166,38 @@ function App() {
   useEffect(() => {
     if (!roomRef.current) return;
     const signalPath = ref(database, `rooms/${roomRef.current}/signals/${clientIdRef.current}`);
-    return onValue(signalPath, (snapshot) => {
-      snapshot.forEach((child) => {
-        const message = child.val() as { type: string; from?: string; offer?: RTCSessionDescriptionInit; answer?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit };
-        const from = message.from;
-        if (!from) return false;
-        void (async () => {
-          try {
-            if (message.type === "offer" && message.offer) {
-              const peer = createPeer(from);
-              await peer.pc.setRemoteDescription(message.offer);
-              for (const candidate of peer.candidates) await peer.pc.addIceCandidate(candidate);
-              peer.candidates = [];
-              const answer = await peer.pc.createAnswer();
-              await peer.pc.setLocalDescription(answer);
-              signal(from, { type: "answer", answer });
-            } else if (message.type === "answer" && message.answer) {
-              const peer = peersRef.current.get(from);
-              if (!peer) return;
-              await peer.pc.setRemoteDescription(message.answer);
-              for (const candidate of peer.candidates) await peer.pc.addIceCandidate(candidate);
-              peer.candidates = [];
-            } else if (message.type === "ice-candidate" && message.candidate) {
-              const peer = createPeer(from);
-              if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(message.candidate);
-              else peer.candidates.push(message.candidate);
-            }
-          } finally {
-            await remove(child.ref);
+    return onChildAdded(signalPath, (child) => {
+      const message = child.val() as { type: string; from?: string; offer?: RTCSessionDescriptionInit; answer?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit };
+      const from = message.from;
+      if (!from) return;
+      void (async () => {
+        try {
+          if (message.type === "offer" && message.offer) {
+            const peer = createPeer(from);
+            await peer.pc.setRemoteDescription(message.offer);
+            for (const candidate of peer.candidates) await peer.pc.addIceCandidate(candidate);
+            peer.candidates = [];
+            const answer = await peer.pc.createAnswer();
+            await peer.pc.setLocalDescription(answer);
+            signal(from, { type: "answer", answer });
+          } else if (message.type === "answer" && message.answer) {
+            const peer = peersRef.current.get(from);
+            if (!peer) return;
+            await peer.pc.setRemoteDescription(message.answer);
+            for (const candidate of peer.candidates) await peer.pc.addIceCandidate(candidate);
+            peer.candidates = [];
+          } else if (message.type === "ice-candidate" && message.candidate) {
+            const peer = createPeer(from);
+            if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(message.candidate);
+            else peer.candidates.push(message.candidate);
           }
-        })();
-        return false;
-      });
+        } catch (signalError) {
+          const code = signalError instanceof Error ? signalError.message : "Unknown signaling error";
+          setError(`Peer connection setup failed: ${code}`);
+        } finally {
+          await remove(child.ref);
+        }
+      })();
     });
   }, [inRoom]);
 
