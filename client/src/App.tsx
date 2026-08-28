@@ -111,11 +111,16 @@ function App() {
   };
 
   const makeOffer = async (peerId: string) => {
-    const peer = createPeer(peerId);
-    setupChannel(peerId, peer.pc.createDataChannel("file-transfer"));
-    const offer = await peer.pc.createOffer();
-    await peer.pc.setLocalDescription(offer);
-    signal(peerId, { type: "offer", offer });
+    try {
+      const peer = createPeer(peerId);
+      if (peer.pc.signalingState !== "stable") return;
+      setupChannel(peerId, peer.pc.createDataChannel("file-transfer"));
+      const offer = await peer.pc.createOffer();
+      await peer.pc.setLocalDescription(offer);
+      signal(peerId, { type: "offer", offer });
+    } catch (offerError) {
+      setError(`Could not connect to a member: ${offerError instanceof Error ? offerError.message : "WebRTC offer failed"}`);
+    }
   };
 
   const removePeer = (peerId: string) => {
@@ -146,8 +151,14 @@ function App() {
       }
       const count = activeIds.size;
       setMemberCount(count);
+      // Use a deterministic initiator for every pair. This prevents offer
+      // collisions and does not depend on join timing or browser speed.
+      for (const peerId of activeIds) {
+        if (peerId !== clientIdRef.current && clientIdRef.current < peerId && !peersRef.current.has(peerId)) {
+          void makeOffer(peerId);
+        }
+      }
     });
-    for (const peerId of existingIds) await makeOffer(peerId);
   };
 
   useEffect(() => {
