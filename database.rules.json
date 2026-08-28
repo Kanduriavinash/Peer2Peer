@@ -1,0 +1,22 @@
+{
+  "rules": {
+    "rooms": {
+      "$roomId": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        "members": {
+          "$memberId": {
+            ".validate": "newData.val() === true || newData.val() === false"
+          }
+        },
+        "signals": {
+          "$targetId": {
+            "$signalId": {
+              ".validate": "newData.hasChildren(['from', 'type']) && newData.child('from').isString() && newData.child('type').isString()"
+            }
+          }
+        }
+      }
+    }
+  }
+}

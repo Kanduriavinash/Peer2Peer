@@ -155,12 +155,12 @@ Two devices on unrelated networks with no internet or shared local network canno
 | --- | --- | --- |
 | User interface | React + TypeScript | Room, member, file, progress, and download UI |
 | Frontend build | Vite | Development server and production bundle |
-| Signaling | Node.js + `ws` | Room membership and targeted WebRTC signaling |
+| Signaling | Firebase Realtime Database | Room membership and targeted WebRTC signaling |
 | Peer transport | WebRTC `RTCPeerConnection` | Direct browser-to-browser connections |
 | File transport | WebRTC `RTCDataChannel` | Metadata and binary file chunks |
 | Integrity | SHA-256 via `js-sha256` | Verify reconstructed files in mobile and desktop contexts |
 | Frontend hosting | GitHub Pages | Static production frontend |
-| Signaling hosting | Render/Railway/Fly.io/VPS | Persistent WebSocket service |
+| Signaling hosting | Firebase | Hosted room and signaling service; no laptop required |
 
 ## Repository structure
 
@@ -234,17 +234,21 @@ Use `ipconfig` on Windows to find the LAN address. Create a room, share the room
 
 ## Deploy
 
-GitHub Pages hosts static files only. It cannot run the Node WebSocket signaling server. A functional production deployment therefore has two services.
+The current browser client uses Firebase Realtime Database for signaling, so the laptop does not need to remain open. GitHub Pages can host the frontend by itself. The legacy Node signaling server in `server` is still available for local development and reference, but it is not required by the Firebase-powered client.
 
-### 1. Deploy the signaling server
+### 1. Configure Firebase
 
-Deploy the repository's `server` service to Render, Railway, Fly.io, or a VPS. The included `render.yaml` provides a Render starting point. The server reads the hosting provider's `PORT` environment variable and uses port `8080` locally.
+The Firebase project used by this app is configured in `client/src/firebase.ts`.
 
-The public endpoint must support WebSockets. For example:
+In the Firebase Console:
 
-```text
-wss://peershare-signaling.example.com
-```
+1. Open **Build → Authentication → Sign-in method**.
+2. Enable **Anonymous** sign-in.
+3. Open **Build → Realtime Database** and create the database.
+4. Open the database **Rules** tab.
+5. Paste the contents of [`database.rules.json`](./database.rules.json) and publish them.
+
+The rules require an authenticated Firebase user and allow only the temporary room data needed by the application. Do not use open test-mode rules in production.
 
 ### 2. Configure GitHub Pages
 
@@ -252,10 +256,7 @@ The included `.github/workflows/deploy-pages.yml` builds `client` and publishes 
 
 1. In GitHub, open **Settings → Pages**.
 2. Select **GitHub Actions** as the source.
-3. Open **Settings → Secrets and variables → Actions → Variables**.
-4. Add a repository variable named `VITE_SIGNALING_URL`.
-5. Set its value to the secure WebSocket URL, such as `wss://peershare-signaling.example.com`.
-6. Push to `main`, or manually run **Deploy PeerShare to GitHub Pages** from the Actions tab.
+4. Push to `main`, or manually run **Deploy PeerShare to GitHub Pages** from the Actions tab.
 
 The Vite base path is configured for this repository, so the expected Pages URL is:
 
@@ -263,19 +264,19 @@ The Vite base path is configured for this repository, so the expected Pages URL 
 https://kanduriavinash.github.io/Peer2Peer/
 ```
 
-Do not use `ws://` from an HTTPS GitHub Pages site; browsers block mixed-content WebSockets. Use `wss://` in production.
+Firebase provides the hosted signaling connection over HTTPS/WebSockets. No Render account, Cloudflare Tunnel, public laptop, or `VITE_SIGNALING_URL` is required for this Firebase version.
 
 ## Configuration
 
-Local development automatically uses:
+The Firebase web configuration in `client/src/firebase.ts` contains public browser configuration, not a service-account private key. The actual file data is never written to Firebase.
+
+The local Node signaling server can still be run independently with:
 
 ```text
 ws(s)://<current-browser-hostname>:8080
 ```
 
-For deployment, set `VITE_SIGNALING_URL` before the Vite build. Only variables beginning with `VITE_` are exposed to the browser, so this value must not contain private credentials.
-
-A template is available at [`client/.env.example`](./client/.env.example). The local `.env` file is ignored by Git.
+The Firebase-powered client does not require `VITE_SIGNALING_URL`. A template remains at [`client/.env.example`](./client/.env.example) for older WebSocket deployments.
 
 ## Security and privacy
 

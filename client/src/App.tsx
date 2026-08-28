@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { sha256 } from "js-sha256";
+import { get, onDisconnect, onValue, push, ref, remove, set } from "firebase/database";
+import { signInAnonymously } from "firebase/auth";
+import { auth, database } from "./firebase";
 import "./App.css";
 
 type Metadata = { name: string; size: number; type: string; hash: string };
@@ -14,10 +17,10 @@ const LOW_BUFFERED = 1024 * 1024;
 const hashFile = async (file: Blob) => sha256(await file.arrayBuffer());
 const createId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const formatSize = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 ** 2 ? `${(bytes / 1024).toFixed(1)} KB` : bytes < 1024 ** 3 ? `${(bytes / 1024 ** 2).toFixed(2)} MB` : `${(bytes / 1024 ** 3).toFixed(2)} GB`;
-const signalingUrl = import.meta.env.VITE_SIGNALING_URL || `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:8080`;
 
 function App() {
-  const socketRef = useRef<WebSocket | null>(null);
+  const clientIdRef = useRef(createId());
+  const roomRef = useRef("");
   const peersRef = useRef(new Map<string, Peer>());
   const incomingRef = useRef(new Map<string, Incoming>());
   const [serverStatus, setServerStatus] = useState("connecting");
@@ -32,8 +35,10 @@ function App() {
   const [error, setError] = useState("");
   const [downloads, setDownloads] = useState<{ url: string; name: string }[]>([]);
 
-  const signal = (message: object) => {
-    if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify(message));
+  const signal = (to: string, message: object) => {
+    const room = roomRef.current;
+    if (!room) return;
+    push(ref(database, `rooms/${room}/signals/${to}`), { ...message, from: clientIdRef.current });
   };
 
   const refreshConnected = () => setConnectedCount([...peersRef.current.values()].filter((peer) => peer.channel?.readyState === "open").length);
@@ -91,7 +96,7 @@ function App() {
     const existing = peersRef.current.get(peerId);
     if (existing) return existing;
     const peer: Peer = { pc: new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] }), candidates: [] };
-    peer.pc.onicecandidate = (event) => event.candidate && signal({ type: "ice-candidate", to: peerId, candidate: event.candidate });
+    peer.pc.onicecandidate = (event) => event.candidate && signal(peerId, { type: "ice-candidate", candidate: event.candidate });
     peer.pc.onconnectionstatechange = refreshConnected;
     peer.pc.ondatachannel = (event) => setupChannel(peerId, event.channel);
     peersRef.current.set(peerId, peer);
@@ -103,7 +108,7 @@ function App() {
     setupChannel(peerId, peer.pc.createDataChannel("file-transfer"));
     const offer = await peer.pc.createOffer();
     await peer.pc.setLocalDescription(offer);
-    signal({ type: "offer", to: peerId, offer });
+    signal(peerId, { type: "offer", offer });
   };
 
   const removePeer = (peerId: string) => {
@@ -114,50 +119,80 @@ function App() {
     refreshConnected();
   };
 
+  const joinFirebaseRoom = async (code: string) => {
+    const membersSnapshot = await get(ref(database, `rooms/${code}/members`));
+    const members = membersSnapshot.val() ?? {};
+    const existingIds = Object.keys(members).filter((id) => members[id] === true && id !== clientIdRef.current);
+    if (existingIds.length >= MAX_MEMBERS) throw new Error("Room is full (maximum 5 members).");
+    roomRef.current = code;
+    await set(ref(database, `rooms/${code}/members/${clientIdRef.current}`), true);
+    await onDisconnect(ref(database, `rooms/${code}/members/${clientIdRef.current}`)).remove();
+    setRoomId(code); setInRoom(true); setMemberCount(existingIds.length + 1); setServerStatus("online");
+    onValue(ref(database, `rooms/${code}/members`), (snapshot) => {
+      const activeIds = new Set<string>();
+      snapshot.forEach((child) => {
+        if (child.val() === true) activeIds.add(child.key ?? "");
+        return false;
+      });
+      for (const peerId of peersRef.current.keys()) {
+        if (!activeIds.has(peerId)) removePeer(peerId);
+      }
+      const count = activeIds.size;
+      setMemberCount(count);
+    });
+    for (const peerId of existingIds) await makeOffer(peerId);
+  };
+
   useEffect(() => {
-    const socket = new WebSocket(signalingUrl);
-    socketRef.current = socket;
-    socket.onopen = () => setServerStatus("online");
-    socket.onerror = () => { setServerStatus("offline"); setError("Signaling server is offline. Start it and refresh this page."); };
-    socket.onclose = () => setServerStatus("offline");
-    socket.onmessage = async (event) => {
-      const message = JSON.parse(event.data) as { type: string; roomId?: string; peers?: number; peerIds?: string[]; peerId?: string; from?: string; offer?: RTCSessionDescriptionInit; answer?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit; message?: string };
-      if (message.type === "room-joined") {
-        setError("");
-        setRoomId(message.roomId ?? ""); setInRoom(true); setMemberCount((message.peers ?? 0) + 1);
-        for (const peerId of message.peerIds ?? []) await makeOffer(peerId);
-      } else if (message.type === "peer-joined" && message.peerId) {
-        setMemberCount((count) => count + 1);
-      } else if (message.type === "offer" && message.from && message.offer) {
-        const peer = createPeer(message.from);
-        await peer.pc.setRemoteDescription(message.offer);
-        for (const candidate of peer.candidates) await peer.pc.addIceCandidate(candidate);
-        peer.candidates = [];
-        const answer = await peer.pc.createAnswer();
-        await peer.pc.setLocalDescription(answer);
-        signal({ type: "answer", to: message.from, answer });
-      } else if (message.type === "answer" && message.from && message.answer) {
-        const peer = peersRef.current.get(message.from);
-        if (!peer) return;
-        await peer.pc.setRemoteDescription(message.answer);
-        for (const candidate of peer.candidates) await peer.pc.addIceCandidate(candidate);
-        peer.candidates = [];
-      } else if (message.type === "ice-candidate" && message.from && message.candidate) {
-        const peer = createPeer(message.from);
-        if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(message.candidate);
-        else peer.candidates.push(message.candidate);
-      } else if (message.type === "peer-left" && message.peerId) {
-        removePeer(message.peerId); setMemberCount((count) => Math.max(1, count - 1));
-      } else if (message.type === "error") setError(message.message ?? "Server error");
-    };
-    return () => { peersRef.current.forEach((peer) => peer.pc.close()); socket.close(); };
+    signInAnonymously(auth)
+      .then(() => setServerStatus("online"))
+      .catch(() => { setServerStatus("offline"); setError("Firebase sign-in is disabled. Enable Anonymous sign-in in Firebase Authentication."); });
+    return () => { peersRef.current.forEach((peer) => peer.pc.close()); };
   }, []);
 
-  const createRoom = () => { setError(""); signal({ type: "create-room" }); };
+  useEffect(() => {
+    if (!roomRef.current) return;
+    const signalPath = ref(database, `rooms/${roomRef.current}/signals/${clientIdRef.current}`);
+    return onValue(signalPath, (snapshot) => {
+      snapshot.forEach((child) => {
+        const message = child.val() as { type: string; from?: string; offer?: RTCSessionDescriptionInit; answer?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit };
+        const from = message.from;
+        if (!from) return false;
+        void (async () => {
+          try {
+            if (message.type === "offer" && message.offer) {
+              const peer = createPeer(from);
+              await peer.pc.setRemoteDescription(message.offer);
+              for (const candidate of peer.candidates) await peer.pc.addIceCandidate(candidate);
+              peer.candidates = [];
+              const answer = await peer.pc.createAnswer();
+              await peer.pc.setLocalDescription(answer);
+              signal(from, { type: "answer", answer });
+            } else if (message.type === "answer" && message.answer) {
+              const peer = peersRef.current.get(from);
+              if (!peer) return;
+              await peer.pc.setRemoteDescription(message.answer);
+              for (const candidate of peer.candidates) await peer.pc.addIceCandidate(candidate);
+              peer.candidates = [];
+            } else if (message.type === "ice-candidate" && message.candidate) {
+              const peer = createPeer(from);
+              if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(message.candidate);
+              else peer.candidates.push(message.candidate);
+            }
+          } finally {
+            await remove(child.ref);
+          }
+        })();
+        return false;
+      });
+    });
+  }, [inRoom]);
+
+  const createRoom = () => { setError(""); void joinFirebaseRoom(createId().replaceAll("-", "").slice(0, 8).toUpperCase()).catch((roomError) => setError(roomError instanceof Error ? roomError.message : "Could not create room.")); };
   const joinRoom = () => {
     const code = joinCode.trim().toUpperCase();
     if (!code) return setError("Enter a room code.");
-    setError(""); signal({ type: "join-room", roomId: code });
+    setError(""); void joinFirebaseRoom(code).catch((roomError) => setError(roomError instanceof Error ? roomError.message : "Could not join room."));
   };
 
   const sendFile = async () => {
